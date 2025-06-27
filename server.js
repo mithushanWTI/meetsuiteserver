@@ -1,33 +1,44 @@
 const nodemailer = require('nodemailer');
 const express = require('express');
 const cors = require('cors');
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 443;
 
 // Log environment variables for debugging
-console.log('EMAIL_USER:', process.env.EMAIL_USER);
-console.log('EMAIL_PASS:', process.env.EMAIL_PASS);
+console.log('Environment variables:', {
+  EMAIL_USER: process.env.EMAIL_USER,
+  EMAIL_PASS: process.env.EMAIL_PASS ? '****' : 'Not set',
+  RECAPTCHA_SECRET_KEY: process.env.RECAPTCHA_SECRET_KEY ? '****' : 'Not set',
+});
 
 // Middleware
 app.use(express.json());
 app.use(cors({
-  origin: 'http://localhost:5173',
+  origin: ['https://meetsuite.io', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Nodemailer configuration for Namecheap Private Email
+// Explicitly handle OPTIONS for /api/book
+app.options('/api/book', cors({
+  origin: ['https://meetsuite.io', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}), (req, res) => {
+  res.status(204).send();
+});
+
+// Nodemailer configuration for Gmail
 const transporter = nodemailer.createTransport({
-  host: 'business94.web-hosting.com',
+  host: 'smtp.gmail.com',
   port: 465,
-  secure: true, // Use TLS
+  secure: true,
   auth: {
-    user: process.env.EMAIL_USER, // info@meetsuite.io
-    pass: process.env.EMAIL_PASS, // Password for info@meetsuite.io
-  },
-  tls: {
-    // Ensure compatibility with Namecheap's TLS requirements
-    ciphers: 'SSLv3',
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
   },
 });
 
@@ -42,6 +53,13 @@ transporter.verify((error, success) => {
 
 // Endpoint to handle form submission
 app.post('/api/book', async (req, res) => {
+  console.log('Received request:', {
+    origin: req.get('Origin'),
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+  });
+
   const {
     tripType,
     country,
@@ -56,11 +74,45 @@ app.post('/api/book', async (req, res) => {
     flightNumber,
     travelDate,
     transitDetails,
+    comments,
+    recaptchaToken,
   } = req.body;
 
+  // Validate required fields
+  if (!name || !email || !recaptchaToken) {
+    console.error('Missing required fields:', { name, email, recaptchaToken });
+    return res.status(400).json({ error: 'Name, email, and reCAPTCHA token are required' });
+  }
+
+  // Verify reCAPTCHA v2 token
+  try {
+    const recaptchaResponse = await axios.post(
+      'https://www.google.com/recaptcha/api/siteverify',
+      new URLSearchParams({
+        secret: process.env.RECAPTCHA_SECRET_KEY,
+        response: recaptchaToken,
+      }),
+      {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      }
+    );
+
+    const { success } = recaptchaResponse.data;
+    console.log('reCAPTCHA v2 verification response:', recaptchaResponse.data);
+
+    if (!success) {
+      console.error('reCAPTCHA verification failed:', recaptchaResponse.data);
+      return res.status(400).json({ error: 'reCAPTCHA verification failed' });
+    }
+  } catch (error) {
+    console.error('reCAPTCHA verification error:', error.message, error.response?.data);
+    return res.status(500).json({ error: 'Failed to verify reCAPTCHA', details: error.message });
+  }
+
+  // Prepare email content
   const mailOptions = {
-    from: `"MeetSuite" <${process.env.EMAIL_USER}>`, // Sender name and email
-    to: 'ops@ftsaero.com', // Recipient email
+    from: `"MeetSuite" <${process.env.EMAIL_USER}>`,
+    to: 'mithushan0099@gmail.com',
     subject: 'New Booking Form Submission',
     text: `
       New Booking Submission:
@@ -77,14 +129,17 @@ app.post('/api/book', async (req, res) => {
       Flight Number: ${flightNumber || 'Not specified'}
       Travel Date: ${travelDate || 'Not specified'}
       Transit Details: ${transitDetails || 'Not applicable'}
+      Comments: ${comments || 'Not specified'}
     `,
   };
 
+  // Send email
   try {
     await transporter.sendMail(mailOptions);
+    console.log('Email sent successfully to:', mailOptions.to);
     res.status(200).json({ message: 'Booking submitted successfully and email sent!' });
   } catch (error) {
-    console.error('Error sending email:', error.message, error.code, error.response);
+    console.error('Error sending email:', error.message, error.code, error.response?.data);
     res.status(500).json({ error: 'Failed to send email', details: error.message });
   }
 });
@@ -92,5 +147,4 @@ app.post('/api/book', async (req, res) => {
 // Start server
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
-});
-
+});  
